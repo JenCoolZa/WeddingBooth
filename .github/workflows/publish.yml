@@ -1,0 +1,43 @@
+# One press publishes the Windows installer that is waiting on the photo server (owner, 25 Nov 2026).
+# next.json in this repo says which version waits and where; it is written after every build of the app.
+# Nothing is published unless the installer's checksum is the one in latest.yml and the version matches.
+name: Publish the staged installer
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read what is waiting
+        run: |
+          V=$(jq -r .ver next.json); S=$(jq -r .stage next.json)
+          [[ "$V" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "next.json: bad version"; exit 1; }
+          [[ "$S" =~ ^https://weddingbooth\.sumet-phaladech\.workers\.dev/stage/[0-9a-f]{32}$ ]] || { echo "next.json: bad staging address"; exit 1; }
+          if gh api "repos/$GITHUB_REPOSITORY/releases/tags/v$V" > /dev/null 2>&1; then echo "v$V is already published: nothing to do"; exit 1; fi
+          echo "V=$V" >> "$GITHUB_ENV"; echo "S=$S" >> "$GITHUB_ENV"
+      - name: Download and check the installer
+        run: |
+          EXE="JOURNEY.PHOTOBOOTH.Setup.$V.exe"
+          mkdir rel && cd rel
+          for f in "$EXE" "$EXE.blockmap" latest.yml notes.txt; do curl -fsSL --retry 3 -o "$f" "$S/$f"; done
+          SZ=$(stat -c %s "$EXE"); echo "installer $SZ bytes"
+          [ "$SZ" -gt 100000000 ] || { echo "installer too small"; exit 1; }
+          SHA=$(openssl dgst -sha512 -binary "$EXE" | base64 -w0)
+          grep -qF "$SHA" latest.yml || { echo "checksum is not the one in latest.yml: NOT published"; exit 1; }
+          grep -qx "version: $V" latest.yml || { echo "latest.yml is for another version"; exit 1; }
+          grep -qF "url: $EXE" latest.yml || { echo "latest.yml does not name $EXE"; exit 1; }
+          for n in JOURNEY.PHOTOBOOTH.Setup.exe JOURNEY.BOOTH.Setup.exe Wedding.Booth.Setup.exe; do cp "$EXE" "$n"; done
+          curl -fsSL --retry 3 -o Wedding.Booth.dmg "https://github.com/$GITHUB_REPOSITORY/releases/latest/download/Wedding.Booth.dmg"
+          [ "$(stat -c %s Wedding.Booth.dmg)" -gt 100000000 ] || { echo "Mac file too small"; exit 1; }
+          ls -la
+      - name: Publish
+        run: |
+          cd rel
+          EXE="JOURNEY.PHOTOBOOTH.Setup.$V.exe"
+          gh release create "v$V" --repo "$GITHUB_REPOSITORY" --title "JOURNEY PHOTOBOOTH $V" --notes-file notes.txt "$EXE" "$EXE.blockmap" latest.yml JOURNEY.PHOTOBOOTH.Setup.exe JOURNEY.BOOTH.Setup.exe Wedding.Booth.Setup.exe Wedding.Booth.dmg
+          echo "v$V published"
